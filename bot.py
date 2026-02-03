@@ -7,6 +7,7 @@ from flask import Flask
 from threading import Thread
 
 # ================= RENDER PORT FIX =================
+# This creates a tiny web server so Render doesn't shut down your bot.
 app = Flask('')
 
 @app.route('/')
@@ -37,10 +38,11 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn, conn.cursor()
 
+# Initialize tables
 conn, db = get_db()
-db.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, referrals INTEGER DEFAULT 0, upi TEXT)""")
-db.execute("""CREATE TABLE IF NOT EXISTS promo (code TEXT PRIMARY KEY, amount INTEGER)""")
-db.execute("""CREATE TABLE IF NOT EXISTS withdraw (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, upi TEXT, status TEXT)""")
+db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, referrals INTEGER DEFAULT 0, upi TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS promo (code TEXT PRIMARY KEY, amount INTEGER)")
+db.execute("CREATE TABLE IF NOT EXISTS withdraw (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, upi TEXT, status TEXT)")
 conn.commit()
 
 # ================= HELPERS =================
@@ -57,7 +59,8 @@ def get_user(uid):
 def is_joined(uid):
     for ch in FORCE_CHANNELS:
         try:
-            if bot.get_chat_member(ch, uid).status in ["left", "kicked"]:
+            status = bot.get_chat_member(ch, uid).status
+            if status in ["left", "kicked"]:
                 return False
         except:
             return False
@@ -84,9 +87,6 @@ def main_menu():
 def back_menu():
     return InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back", callback_data="back"))
 
-def withdraw_back_menu():
-    return InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back", callback_data="withdraw_back"))
-
 def admin_menu():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -97,27 +97,24 @@ def admin_menu():
     )
     return kb
 
-# ================= START & REFERRAL LOGIC =================
+# ================= START & REFERRAL =================
 @bot.message_handler(commands=["start"])
 def start(message):
     uid = message.from_user.id
     args = message.text.split()
     
-    # Check if user is new
     conn, db = get_db()
     db.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
     is_new = db.fetchone() is None
 
     if is_new and len(args) > 1:
-        referrer_id = args[1]
-        if referrer_id.isdigit() and int(referrer_id) != uid:
-            # Reward the referrer
-            db.execute("UPDATE users SET balance = balance + ?, referrals = referrals + 1 WHERE user_id = ?", (REF_BONUS, referrer_id))
+        ref_id = args[1]
+        if ref_id.isdigit() and int(ref_id) != uid:
+            db.execute("UPDATE users SET balance = balance + ?, referrals = referrals + 1 WHERE user_id = ?", (REF_BONUS, ref_id))
             conn.commit()
             try:
-                bot.send_message(referrer_id, f"🎯 <b>New Referral!</b> You earned ₹{REF_BONUS}")
-            except:
-                pass
+                bot.send_message(ref_id, f"🎯 <b>New Referral!</b> You earned ₹{REF_BONUS}")
+            except: pass
 
     if not is_joined(uid):
         bot.send_message(uid, "🚨 <b>Join channels first</b>", reply_markup=force_join_kb())
@@ -142,7 +139,7 @@ def addpromo(message):
     conn, db = get_db()
     db.execute("INSERT OR REPLACE INTO promo VALUES (?,?)", (parts[1].upper(), int(parts[2])))
     conn.commit()
-    bot.send_message(message.chat.id, f"✅ Promo {parts[1]} added")
+    bot.send_message(message.chat.id, f"✅ Promo {parts[1].upper()} added")
 
 # ================= CALLBACKS =================
 @bot.callback_query_handler(func=lambda c: True)
@@ -154,36 +151,35 @@ def router(call):
         if is_joined(uid):
             bot.edit_message_text("✅ Access granted", uid, call.message.message_id, reply_markup=main_menu())
         else:
-            bot.answer_callback_query(call.id, "Join all channels", show_alert=True)
+            bot.answer_callback_query(call.id, "Join all channels!", show_alert=True)
 
     elif data == "profile":
         bal, refs, upi = get_user(uid)
         bot.edit_message_text(f"👤 <b>Profile</b>\n\n💰 Balance: ₹{bal}\n👥 Referrals: {refs}\n💳 UPI: {upi or 'Not set'}", uid, call.message.message_id, reply_markup=back_menu())
 
     elif data == "refer":
-        bot_username = bot.get_me().username
-        link = f"https://t.me/{bot_username}?start={uid}"
-        bot.edit_message_text(f"🔗 <b>Your Invite Link:</b>\n{link}\n\n🎁 Reward: ₹{REF_BONUS} per friend", uid, call.message.message_id, reply_markup=back_menu())
+        link = f"https://t.me/{bot.get_me().username}?start={uid}"
+        bot.edit_message_text(f"🔗 <b>Invite Link:</b>\n{link}\n\n₹{REF_BONUS} per friend", uid, call.message.message_id, reply_markup=back_menu())
 
     elif data == "promo":
-        bot.edit_message_text("🎁 Enter your promo code:", uid, call.message.message_id, reply_markup=back_menu())
+        bot.edit_message_text("🎁 Enter Promo Code:", uid, call.message.message_id, reply_markup=back_menu())
         bot.register_next_step_handler_by_chat_id(uid, redeem_promo)
 
     elif data == "withdraw":
         bal, _, upi = get_user(uid)
         if not upi:
-            bot.edit_message_text("💳 Enter your UPI ID:", uid, call.message.message_id, reply_markup=withdraw_back_menu())
+            bot.edit_message_text("💳 Enter your UPI ID:", uid, call.message.message_id, reply_markup=back_menu())
             bot.register_next_step_handler_by_chat_id(uid, save_upi)
         elif bal < MIN_WITHDRAW:
-            bot.answer_callback_query(call.id, f"Minimum ₹{MIN_WITHDRAW} required", True)
+            bot.answer_callback_query(call.id, f"Min ₹{MIN_WITHDRAW} required", True)
         else:
-            bot.edit_message_text("💸 Enter amount to withdraw:", uid, call.message.message_id, reply_markup=withdraw_back_menu())
+            bot.edit_message_text(f"💸 Your Balance: ₹{bal}\nEnter amount to withdraw:", uid, call.message.message_id, reply_markup=back_menu())
             bot.register_next_step_handler_by_chat_id(uid, withdraw_amount)
 
-    elif data == "back" or data == "withdraw_back":
+    elif data == "back":
         bot.edit_message_text("🏠 Main Menu", uid, call.message.message_id, reply_markup=main_menu())
 
-    # --- ADMIN ACTIONS ---
+    # --- ADMIN SECTION ---
     elif data == "admin_pending" and uid == ADMIN_ID:
         conn, db = get_db()
         db.execute("SELECT * FROM withdraw WHERE status='pending'")
@@ -194,13 +190,28 @@ def router(call):
         text = "⏳ <b>Pending</b>\n\n"
         kb = InlineKeyboardMarkup()
         for r in rows:
-            text += f"ID:{r['id']} | ₹{r['amount']} | {r['upi']}\n"
+            text += f"ID:{r['id']} | ₹{r['amount']} | User:{r['user_id']}\nUPI:{r['upi']}\n\n"
             kb.add(InlineKeyboardButton(f"✅ Appr {r['id']}", callback_data=f"ap_{r['id']}"), InlineKeyboardButton(f"❌ Rej {r['id']}", callback_data=f"rej_{r['id']}"))
-        kb.add(InlineKeyboardButton("⬅️ Back", callback_data="admin_back"))
+        kb.add(InlineKeyboardButton("⬅️ Back", callback_data="back"))
         bot.edit_message_text(text, uid, call.message.message_id, reply_markup=kb)
 
-    elif data == "admin_back":
-        bot.edit_message_text("👑 Admin Panel", uid, call.message.message_id, reply_markup=admin_menu())
+    elif data == "admin_history" and uid == ADMIN_ID:
+        conn, db = get_db()
+        db.execute("SELECT * FROM withdraw ORDER BY id DESC LIMIT 15")
+        rows = db.fetchall()
+        text = "📜 <b>History (Last 15)</b>\n\n" if rows else "No history."
+        for r in rows:
+            text += f"ID:{r['id']} | ₹{r['amount']} | {r['status']}\n"
+        bot.edit_message_text(text, uid, call.message.message_id, reply_markup=admin_menu())
+
+    elif data == "admin_promos" and uid == ADMIN_ID:
+        conn, db = get_db()
+        db.execute("SELECT * FROM promo")
+        rows = db.fetchall()
+        text = "🎁 <b>Active Promos</b>\n\n" if rows else "No active promos."
+        for r in rows:
+            text += f"{r['code']} → ₹{r['amount']}\n"
+        bot.edit_message_text(text, uid, call.message.message_id, reply_markup=admin_menu())
 
     elif data.startswith(("ap_", "rej_")) and uid == ADMIN_ID:
         wid = int(data.split("_")[1])
@@ -210,23 +221,24 @@ def router(call):
         if row:
             if data.startswith("ap_"):
                 db.execute("UPDATE withdraw SET status='approved' WHERE id=?", (wid,))
-                bot.send_message(row["user_id"], "✅ Your withdrawal has been approved!")
+                bot.send_message(row["user_id"], "✅ Withdrawal approved!")
             else:
                 db.execute("UPDATE withdraw SET status='rejected' WHERE id=?", (wid,))
                 db.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (row["amount"], row["user_id"]))
-                bot.send_message(row["user_id"], "❌ Withdrawal rejected. Funds refunded.")
+                bot.send_message(row["user_id"], "❌ Withdrawal rejected (Refunded).")
             conn.commit()
-        bot.edit_message_text("✅ Updated", uid, call.message.message_id, reply_markup=admin_menu())
+        bot.edit_message_text("✅ Action completed", uid, call.message.message_id, reply_markup=admin_menu())
 
 # ================= HANDLERS =================
 def redeem_promo(message):
+    code = message.text.strip().upper()
     conn, db = get_db()
-    db.execute("SELECT amount FROM promo WHERE code=?", (message.text.strip().upper(),))
+    db.execute("SELECT amount FROM promo WHERE code=?", (code,))
     row = db.fetchone()
     if not row:
-        bot.send_message(message.chat.id, "❌ Invalid promo", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "❌ Invalid Promo", reply_markup=main_menu())
         return
-    db.execute("DELETE FROM promo WHERE code=?", (message.text.strip().upper(),))
+    db.execute("DELETE FROM promo WHERE code=?", (code,))
     db.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (row["amount"], message.chat.id))
     conn.commit()
     bot.send_message(message.chat.id, f"✅ ₹{row['amount']} added!", reply_markup=main_menu())
@@ -235,7 +247,6 @@ def save_upi(message):
     upi = message.text.strip()
     if "@" not in upi:
         bot.send_message(message.chat.id, "❌ Invalid UPI. Try again.")
-        bot.register_next_step_handler_by_chat_id(message.chat.id, save_upi)
         return
     conn, db = get_db()
     db.execute("UPDATE users SET upi=? WHERE user_id=?", (upi, message.chat.id))
@@ -244,12 +255,12 @@ def save_upi(message):
 
 def withdraw_amount(message):
     if not message.text.isdigit():
-        bot.send_message(message.chat.id, "Enter numbers only.", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "Enter digits only.")
         return
     amt = int(message.text)
     bal, _, upi = get_user(message.chat.id)
     if amt > bal or amt < MIN_WITHDRAW:
-        bot.send_message(message.chat.id, "Invalid amount or low balance.", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "Insufficient balance or below limit.")
         return
     conn, db = get_db()
     db.execute("INSERT INTO withdraw (user_id, amount, upi, status) VALUES (?,?,?,?)", (message.chat.id, amt, upi, "pending"))
@@ -259,13 +270,9 @@ def withdraw_amount(message):
 
 # ================= RUN =================
 if __name__ == "__main__":
-    print("🌐 Starting Web Server...")
     keep_alive()
-    
     while True:
         try:
-            print("🤖 Bot is active...")
             bot.infinity_polling(timeout=20, long_polling_timeout=20)
         except Exception as e:
-            print(f"⚠️ Error: {e}")
             time.sleep(5)
